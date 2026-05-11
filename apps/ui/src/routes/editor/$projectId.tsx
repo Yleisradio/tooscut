@@ -8,6 +8,8 @@ import type { MediaAsset } from "../../state/video-editor-store";
 
 import { AssetPanel } from "../../components/editor/asset-panel";
 import { KeyboardShortcutsModal } from "../../components/editor/keyboard-shortcuts-modal";
+import { useTamsHydration } from "../../components/editor/tams/use-tams-hydration";
+import { useTamsUrlRefresh } from "../../components/editor/tams/use-tams-url-refresh";
 import { PlaybackControls } from "../../components/editor/playback-controls";
 import { PreviewPanel } from "../../components/editor/preview-panel";
 import { PropertiesPanel } from "../../components/editor/properties-panel";
@@ -49,6 +51,12 @@ function EditorPage() {
 
   // Auto-save project changes
   useAutoSave(projectId);
+
+  // Re-fetch presigned TAMS URLs after auth is established
+  useTamsHydration();
+
+  // Proactively refresh near-expiry TAMS URLs every 60s
+  useTamsUrlRefresh();
 
   // Load project on mount
   useEffect(() => {

@@ -28,9 +28,26 @@ interface StoredFileHandle {
   storedAt: number;
 }
 
+export interface AppSetting {
+  key: string;
+  value: string;
+}
+
+export interface TamsAssetRecord {
+  id: string;
+  sourceId: string;
+  flowId: string;
+  segmentTimerange: string;
+  label: string;
+  format: string;
+  storedAt: number;
+}
+
 class EditorDatabase extends Dexie {
   projects!: Table<LocalProject>;
   fileHandles!: Table<StoredFileHandle>;
+  settings!: Table<AppSetting, string>;
+  tamsAssets!: Table<TamsAssetRecord, string>;
 
   constructor() {
     super("tooscut-editor");
@@ -111,6 +128,21 @@ class EditorDatabase extends Dexie {
             }
           });
       });
+
+    // V4: Add settings table for persisted app configuration (e.g. TAMS API URL)
+    this.version(4).stores({
+      projects: "id, updatedAt, name",
+      fileHandles: "id",
+      settings: "key",
+    });
+
+    // V5: Add tamsAssets table for TAMS flow metadata (URLs refresh in Phase 5)
+    this.version(5).stores({
+      projects: "id, updatedAt, name",
+      fileHandles: "id",
+      settings: "key",
+      tamsAssets: "id, sourceId, flowId",
+    });
   }
 }
 

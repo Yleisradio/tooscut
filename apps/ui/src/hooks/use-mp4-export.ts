@@ -11,6 +11,7 @@ import { EvaluatorManager, framesToSeconds } from "@tooscut/render-engine";
 import {
   AudioSample,
   AudioSampleSource,
+  BufferTarget,
   EncodedPacket,
   EncodedVideoPacketSource,
   Mp4OutputFormat,
@@ -48,8 +49,11 @@ export interface ExportOptions {
   videoBitrate?: number;
   /** Audio bitrate in bits per second (default: 128000) */
   audioBitrate?: number;
-  /** File handle from showSaveFilePicker for streaming to disk */
-  fileHandle: FileSystemFileHandle;
+  /**
+   * File handle from showSaveFilePicker for streaming to disk.
+   * When omitted the output is held in memory and returned as `ExportResult.buffer`.
+   */
+  fileHandle?: FileSystemFileHandle;
 }
 
 interface ExportProgress {
@@ -76,6 +80,8 @@ export interface ExportResult {
   duration: number;
   /** Time taken to render in seconds */
   renderTime: number;
+  /** Rendered MP4 bytes — only set when no fileHandle was provided. */
+  buffer?: ArrayBuffer;
 }
 
 interface Mp4ExportHandle {
@@ -363,6 +369,7 @@ export function useMp4Export(): Mp4ExportHandle {
 
     let pool: FrameRendererPool | null = null;
     let fileWritable: FileSystemWritableFileStream | null = null;
+    let bufferTarget: BufferTarget | null = null;
 
     try {
       const exportStartTime = Date.now();
@@ -395,13 +402,35 @@ export function useMp4Export(): Mp4ExportHandle {
       // Create asset map
       const assetMap = new Map(assets.map((a) => [a.id, a]));
 
+      // Pre-fetch TAMS asset blobs so they can be rendered like local files.
+      // Done once here so both the video frame renderer and audio renderer
+      // get the same data without duplicate network requests.
+      const tamsBlobs = new Map<string, Blob>();
+      {
+        const uniqueTamsIds = new Set<string>();
+        for (const clip of clips.filter((c) => c.type === "video" || c.type === "audio" || c.type === "image")) {
+          const assetId = clip.assetId || clip.id;
+          const asset = assetMap.get(assetId);
+          if (asset?.source === "tams") uniqueTamsIds.add(assetId);
+        }
+        for (const assetId of uniqueTamsIds) {
+          const asset = assetMap.get(assetId)!;
+          try {
+            const r = await fetch(asset.url);
+            if (r.ok) tamsBlobs.set(assetId, await r.blob());
+          } catch {
+            // Skip — that clip will render as black/silent
+          }
+        }
+      }
+
       // Pre-load image assets as ImageBitmaps
       const imageBitmaps = new Map<string, ImageBitmap>();
       const mediaClips = clips.filter((c) => c.type === "video" || c.type === "image");
 
       for (const clip of mediaClips) {
         const asset = assetMap.get(clip.assetId || clip.id);
-        if (!asset?.file || asset.type !== "image") continue;
+        if (asset?.source !== "local" || asset.type !== "image") continue;
         if (imageBitmaps.has(asset.id)) continue;
 
         try {
@@ -504,39 +533,67 @@ export function useMp4Export(): Mp4ExportHandle {
 
       updateProgress(1);
 
-      // Load video assets into workers
+      // Load video assets into workers (local files + pre-fetched TAMS blobs)
       const loadedVideoAssets = new Set<string>();
       for (const clip of mediaClips) {
         const assetId = clip.assetId || clip.id;
         const asset = assetMap.get(assetId);
-        if (!asset?.file || asset.type !== "video") continue;
-        if (loadedVideoAssets.has(asset.id)) continue;
-        loadedVideoAssets.add(asset.id);
-        await pool.loadVideoAsset(asset.id, asset.file);
+        if (asset?.type !== "video") continue;
+        if (loadedVideoAssets.has(assetId)) continue;
+        const blob = asset.source === "local" ? asset.file : tamsBlobs.get(assetId);
+        if (!blob) continue;
+        loadedVideoAssets.add(assetId);
+        await pool.loadVideoAsset(assetId, blob);
       }
 
       updateProgress(1);
 
       const sampleRate = 48000;
       const audioClips = clips.filter((c) => c.type === "audio");
-      const hasAudio = audioClips.length > 0;
+      // Only add an audio track if we have renderable sources (local file or fetched TAMS blob)
+      const hasAudio = audioClips.some((clip) => {
+        const assetId = clip.assetId || clip.id;
+        const asset = assetMap.get(assetId);
+        return asset?.source === "local"
+          ? !!(asset as { file?: File }).file
+          : tamsBlobs.has(assetId);
+      });
+
+      // Augmented map used by audio renderer — merges pre-fetched TAMS blobs
+      // so buildAudioTimelineState can treat them the same as local file assets.
+      const audioAssetMap = new Map<string, { id: string; file?: Blob; type: string }>(
+        [...assetMap].map(([id, asset]) => [
+          id,
+          {
+            id: asset.id,
+            type: asset.type,
+            file: asset.source === "local" ? asset.file : tamsBlobs.get(id),
+          },
+        ]),
+      );
 
       if (cancelledRef.current) {
         pool.dispose();
         throw new Error("Export cancelled");
       }
 
-      // Open file for streaming writes
-      fileWritable = await fileHandle.createWritable();
-
-      const streamTarget = new StreamTarget(fileWritable);
+      // Open output target — stream to disk when a file handle was given,
+      // otherwise collect bytes in memory for in-process consumption.
+      let outputTarget: StreamTarget | BufferTarget;
+      if (fileHandle) {
+        fileWritable = await fileHandle.createWritable();
+        outputTarget = new StreamTarget(fileWritable);
+      } else {
+        bufferTarget = new BufferTarget();
+        outputTarget = bufferTarget;
+      }
 
       const output = new Output({
         format: new Mp4OutputFormat({
           fastStart: "fragmented",
           minimumFragmentDuration: 1,
         }),
-        target: streamTarget,
+        target: outputTarget,
       });
       outputRef.current = output;
 
@@ -621,7 +678,7 @@ export function useMp4Export(): Mp4ExportHandle {
         audioPromise = renderAudioToSource(
           audioClips,
           tracks,
-          assetMap as Map<string, { id: string; file?: Blob; type: string }>,
+          audioAssetMap,
           contentDuration,
           settings.fps,
           sampleRate,
@@ -908,8 +965,6 @@ export function useMp4Export(): Mp4ExportHandle {
           : null,
       );
 
-      // mediabunny writes directly to the FileSystemWritableFileStream
-      // and closes it internally during finalize.
       await output.finalize();
       fileWritable = null;
 
@@ -930,6 +985,7 @@ export function useMp4Export(): Mp4ExportHandle {
       return {
         duration: framesToSeconds(contentDuration, settings.fps),
         renderTime,
+        buffer: bufferTarget?.buffer ?? undefined,
       };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : "Export failed";

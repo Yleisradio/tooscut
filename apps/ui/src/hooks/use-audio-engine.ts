@@ -33,9 +33,14 @@ export function useAudioEngine() {
   const engineRef = useRef<BrowserAudioEngine | null>(null);
   const [isWasmReady, setIsWasmReady] = useState(false);
   const [error, setError] = useState<Error | null>(null);
+  const [registeredCount, setRegisteredCount] = useState(0);
 
   // Keep track of uploaded sources to avoid re-uploading
   const uploadedSourcesRef = useRef<Set<string>>(new Set());
+  // Successfully registered in WASM engine (subset of uploadedSourcesRef)
+  const registeredSourcesRef = useRef<Set<string>>(new Set());
+  // Permanently failed (e.g. 404) — skip timeline, don't retry
+  const failedSourcesRef = useRef<Set<string>>(new Set());
 
   // Store selectors
   const clips = useVideoEditorStore((state) => state.clips);
@@ -71,11 +76,15 @@ export function useAudioEngine() {
       });
 
     const uploadedSources = uploadedSourcesRef.current;
+    const registeredSources = registeredSourcesRef.current;
+    const failedSources = failedSourcesRef.current;
     return () => {
       engine.dispose();
       engineRef.current = null;
       _audioEngineInstance = null;
       uploadedSources.clear();
+      registeredSources.clear();
+      failedSources.clear();
     };
   }, []);
 
@@ -84,15 +93,41 @@ export function useAudioEngine() {
     const engine = engineRef.current;
     if (!engine || !isWasmReady) return;
 
-    const audioAssets = assets.filter((a) => a.type === "video" || a.type === "audio");
+    const audioAssets = assets.filter(
+      (a) => a.type === "video" || a.type === "audio",
+    );
 
     for (const asset of audioAssets) {
       if (uploadedSourcesRef.current.has(asset.id)) continue;
+      if (failedSourcesRef.current.has(asset.id)) continue;
       uploadedSourcesRef.current.add(asset.id);
 
-      engine.registerAudioSource(asset.id, asset.file).catch((err) => {
+      const register = async () => {
+        let blob: Blob;
+        if (asset.source === "local") {
+          blob = asset.file;
+        } else {
+          const r = await fetch(asset.url);
+          if (!r.ok) {
+            throw new Error(`Failed to fetch audio (${r.status}): ${asset.url}`);
+          }
+          blob = await r.blob();
+        }
+        await engine.registerAudioSource(asset.id, blob);
+        registeredSourcesRef.current.add(asset.id);
+        setRegisteredCount((n) => n + 1);
+      };
+
+      register().catch((err) => {
         console.error(`[useAudioEngine] Failed to register audio for ${asset.id}:`, err);
-        uploadedSourcesRef.current.delete(asset.id);
+        const is404 = err instanceof Error && err.message.includes("(404)");
+        if (is404) {
+          // Permanent failure — mark so timeline excludes it and we don't retry
+          failedSourcesRef.current.add(asset.id);
+        } else {
+          // Transient failure — allow retry on next assets change
+          uploadedSourcesRef.current.delete(asset.id);
+        }
       });
     }
   }, [assets, isWasmReady]);
@@ -104,6 +139,7 @@ export function useAudioEngine() {
 
     const audioClips = clips
       .filter((c) => c.type === "audio")
+      .filter((clip) => registeredSourcesRef.current.has(clip.assetId || clip.id))
       .map((clip) => ({
         id: clip.id,
         sourceId: clip.assetId || clip.id,
@@ -136,7 +172,7 @@ export function useAudioEngine() {
     };
 
     engine.setTimeline(timelineState);
-  }, [clips, tracks, fps, isWasmReady]);
+  }, [clips, tracks, fps, isWasmReady, registeredCount]);
 
   // Sync playback state (convert frame → seconds for seek)
   useEffect(() => {

@@ -1,0 +1,29 @@
+{
+  "id": "00000000-0000-0000-0000-000000000002",
+  "source_id": "00000000-0000-0000-0000-000000000001",
+  "format": "urn:x-nmos:format:video",
+  "codec": "video/h264",
+  "container": "video/mp4",
+  "label": "Test Flow",
+  "description": null,
+  "tags": {},
+  "read_only": false,
+  "generation": null,
+  "essence_parameters": {
+    "frame_width": 1920,
+    "frame_height": 1080,
+    "frame_rate": { "numerator": 25, "denominator": 1 }
+  },
+  "flow_collection": null,
+  "collected_by": [],
+  "container_mapping": null,
+  "avg_bit_rate": null,
+  "max_bit_rate": null,
+  "segment_duration": null,
+  "metadata_version": null,
+  "created_by": "admin",
+  "updated_by": null,
+  "created_at": "2024-01-01T00:00:00Z",
+  "metadata_updated_at": "2024-01-01T00:00:00Z",
+  "segments_updated_at": null
+}

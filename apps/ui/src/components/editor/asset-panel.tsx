@@ -1,9 +1,12 @@
-import { X, Plus, Music, Video, Image, FolderOpen, Type, Shapes, Sparkles } from "lucide-react";
-import { useRef, useCallback, useState, type DragEvent } from "react";
+import { X, Plus, Music, Video, Image, FolderOpen, Type, Shapes, Sparkles, Database } from "lucide-react";
+import { useRef, useCallback, useState, useEffect, type DragEvent } from "react";
 
 import { cn } from "@/lib/utils";
 
+import { useSettingsStore } from "../../state/settings-store";
+import { useTamsAuthStore } from "../../state/tams-auth-store";
 import { useVideoEditorStore } from "../../state/video-editor-store";
+import { TamsPanel } from "./tams/tams-panel";
 import {
   useAssetStore,
   importFiles,
@@ -13,6 +16,7 @@ import {
   formatFileSize,
   formatDuration,
   type MediaAsset,
+  type LocalMediaAsset,
 } from "../timeline/use-asset-store";
 import { Button } from "../ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
@@ -87,7 +91,7 @@ function AssetCard({ asset }: { asset: MediaAsset }) {
           {asset.name}
         </div>
         <div className="text-[10px] text-muted-foreground">
-          {formatFileSize(asset.size)}
+          {asset.source === "local" ? formatFileSize(asset.size) : "TAMS"}
           {asset.width && asset.height && ` • ${asset.width}×${asset.height}`}
         </div>
       </div>
@@ -122,7 +126,7 @@ function ImportButton({
   icon: Icon,
 }: {
   accept: string;
-  onImport: (assets: MediaAsset[]) => void;
+  onImport: (assets: LocalMediaAsset[]) => void;
   label?: string;
   icon?: React.ComponentType<{ className?: string }>;
 }) {
@@ -174,7 +178,7 @@ function AssetsContent() {
   const assets = useAssetStore((s) => s.assets);
   const isLoading = useAssetStore((s) => s.isLoading);
 
-  const handleImportedAssets = useCallback((imported: MediaAsset[]) => {
+  const handleImportedAssets = useCallback((imported: LocalMediaAsset[]) => {
     addAssetsToStores(imported);
   }, []);
 
@@ -274,6 +278,7 @@ function AssetsContent() {
 
 const PANEL_TABS = [
   { id: "assets", label: "Assets", icon: FolderOpen },
+  { id: "tams", label: "TAMS", icon: Database },
   { id: "text", label: "Text", icon: Type },
   { id: "shapes", label: "Shapes", icon: Shapes },
   { id: "transitions", label: "Transitions", icon: Sparkles },
@@ -283,6 +288,12 @@ type PanelTab = (typeof PANEL_TABS)[number]["id"];
 
 export function AssetPanel() {
   const [activeTab, setActiveTab] = useState<PanelTab>("assets");
+  const loadFromDb = useSettingsStore((s) => s.loadFromDb);
+
+  // Hydrate settings store from IndexedDB then attempt TAMS session restore
+  useEffect(() => {
+    void loadFromDb().then(() => useTamsAuthStore.getState().restoreSession());
+  }, [loadFromDb]);
   const [isDragOver, setIsDragOver] = useState(false);
   const dragCounterRef = useRef(0);
   const setLoading = useAssetStore((s) => s.setLoading);
@@ -376,6 +387,7 @@ export function AssetPanel() {
         {/* Tab content */}
         <div className="relative flex-1 overflow-auto">
           {activeTab === "assets" && <AssetsContent />}
+          {activeTab === "tams" && <TamsPanel />}
           {activeTab === "text" && (
             <div className="p-2">
               <TextPanel />

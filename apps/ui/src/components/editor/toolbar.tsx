@@ -15,6 +15,7 @@ import { useState, useCallback, useRef, useEffect } from "react";
 
 import { Route } from "../../routes/editor/$projectId";
 import { db } from "../../state/db";
+import { useTamsAuthStore } from "../../state/tams-auth-store";
 import { useVideoEditorStore, useTemporalStore } from "../../state/video-editor-store";
 import { importFilesWithPicker, addAssetsToStores } from "../timeline/use-asset-store";
 import { Button } from "../ui/button";
@@ -33,6 +34,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../ui/
 import { ExportDialog } from "./export-dialog";
 import { openKeyboardShortcuts } from "./keyboard-shortcuts-modal";
 import { ProjectSettingsDialog } from "./project-settings-dialog";
+import { ExportToTamsDialog } from "./tams/export-to-tams-dialog";
 
 interface ToolbarProps {
   /** Open the settings dialog on mount (for new projects) */
@@ -44,6 +46,8 @@ export function Toolbar({ showSettingsOnMount }: ToolbarProps) {
   const exportDialogOpen = useVideoEditorStore((s) => s.exportDialogOpen);
   const setExportDialogOpen = useVideoEditorStore((s) => s.setExportDialogOpen);
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
+  const [tamsExportDialogOpen, setTamsExportDialogOpen] = useState(false);
+  const isTamsAuthenticated = useTamsAuthStore((s) => s.isAuthenticated);
 
   const navigate = useNavigate();
 
@@ -194,6 +198,11 @@ export function Toolbar({ showSettingsOnMount }: ToolbarProps) {
                 Export
                 <MenubarShortcut>⌘E</MenubarShortcut>
               </MenubarItem>
+              {isTamsAuthenticated && (
+                <MenubarItem onClick={() => setTamsExportDialogOpen(true)}>
+                  Export to TAMS
+                </MenubarItem>
+              )}
               <MenubarSeparator />
               <MenubarItem onClick={() => setSettingsDialogOpen(true)}>
                 Project Settings
@@ -385,6 +394,11 @@ export function Toolbar({ showSettingsOnMount }: ToolbarProps) {
 
         {/* Dialogs */}
         <ExportDialog open={exportDialogOpen} onOpenChange={setExportDialogOpen} />
+        <ExportToTamsDialog
+          open={tamsExportDialogOpen}
+          onOpenChange={setTamsExportDialogOpen}
+          projectId={projectId}
+        />
         <ProjectSettingsDialog
           open={settingsDialogOpen}
           onOpenChange={handleSettingsDialogChange}

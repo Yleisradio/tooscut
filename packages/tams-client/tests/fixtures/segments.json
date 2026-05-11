@@ -1,0 +1,15 @@
+[
+  {
+    "object_id": "abc123def456",
+    "timerange": "[0:0_30:0)",
+    "get_urls": [
+      { "url": "https://example.com/media/abc123def456?sig=xxx", "label": "default" }
+    ],
+    "ts_offset": null,
+    "object_timerange": null,
+    "last_duration": null,
+    "sample_offset": null,
+    "sample_count": null,
+    "key_frame_count": null
+  }
+]

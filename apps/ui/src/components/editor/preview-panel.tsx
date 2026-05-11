@@ -24,6 +24,7 @@ import {
   type CompositorApi,
 } from "../../workers/compositor-api";
 import { useAssetStore, type MediaAsset } from "../timeline/use-asset-store";
+import { tamsUrlCache } from "./tams/tams-url-cache";
 import { TransformOverlay } from "./transform/transform-overlay";
 
 // Image element entry for the pool
@@ -50,6 +51,10 @@ export function PreviewPanel() {
 
   // Track which textures have been uploaded to avoid re-uploading static images
   const uploadedTexturesRef = useRef<Set<string>>(new Set());
+
+  // Track the URL that each loader was created with — used to detect URL rotation
+  // and dispose stale loaders so they are recreated with the fresh presigned URL.
+  const loaderUrlsRef = useRef(new Map<string, string>());
 
   // Track which video elements we've started playing during this playback session.
   // Keyed by assetId. Prevents re-entering the "paused" seek path on every frame
@@ -207,6 +212,9 @@ export function PreviewPanel() {
     const existing = imageElementsRef.current.get(asset.id);
     if (existing) return existing;
 
+    // TAMS assets have no local File; presigned URL playback is handled via <video> in Phase 5
+    if (asset.source !== "local") return null;
+
     const img = document.createElement("img");
     const objectUrl = URL.createObjectURL(asset.file);
     img.src = objectUrl;
@@ -303,7 +311,14 @@ export function PreviewPanel() {
         const assetId = clip.assetId || clip.id;
         const textureId = crossTransitionTextureMap.get(clip.id) ?? assetId;
         const asset = assetMapRef.current.get(assetId);
-        if (!asset?.file) continue;
+        if (!asset) continue;
+
+        // Local assets load from a File blob; TAMS assets load from their presigned URL.
+        // For TAMS, route through tamsUrlCache so rotated URLs are picked up.
+        const resolvedUrl =
+          asset.source === "tams" ? (tamsUrlCache.get(assetId) ?? asset.url) : "";
+        const blobOrUrl = asset.source === "local" ? asset.file : resolvedUrl;
+        if (!blobOrUrl) continue;
 
         // Use a per-clip loader key for cross-transition clips so each clip
         // gets its own HTMLVideoElement — two clips of the same asset can't
@@ -311,10 +326,23 @@ export function PreviewPanel() {
         const isInCrossTransition = crossTransitionTextureMap.has(clip.id);
         const loaderKey = isInCrossTransition ? `${assetId}:${clip.id}` : assetId;
 
+        // Dispose the cached loader when the TAMS presigned URL has rotated,
+        // so the next getLoader call creates a fresh HTMLVideoElement.
+        if (asset.source === "tams") {
+          const prevUrl = loaderUrlsRef.current.get(loaderKey);
+          if (prevUrl && prevUrl !== resolvedUrl) {
+            loaderManager.disposeLoader(loaderKey);
+            loaderUrlsRef.current.delete(loaderKey);
+          }
+        }
+
         const sourceTime = calculateSourceTime(frame, clip, currentFps);
 
         try {
-          const loader = await loaderManager.getLoader(loaderKey, asset.file);
+          const loader = await loaderManager.getLoader(loaderKey, blobOrUrl);
+          if (asset.source === "tams") {
+            loaderUrlsRef.current.set(loaderKey, resolvedUrl);
+          }
           const videoElement = loader.getVideoElement();
 
           if (videoElement) {
@@ -385,7 +413,11 @@ export function PreviewPanel() {
             }
           }
         } catch {
-          // Ignore frame extraction errors
+          // On any error for a TAMS asset, invalidate the cache entry so the
+          // next sweep re-fetches the presigned URL (handles 403 expiry).
+          if (asset?.source === "tams") {
+            tamsUrlCache.invalidate(assetId);
+          }
         }
       }
 
@@ -566,12 +598,26 @@ export function PreviewPanel() {
       for (const clip of visibleVideoClips) {
         const assetId = clip.assetId || clip.id;
         const asset = assetMapRef.current.get(assetId);
-        if (!asset?.file) continue;
+        const resolvedPlayUrl =
+          asset?.source === "tams" ? (tamsUrlCache.get(assetId) ?? asset.url) : "";
+        const blobOrUrl = asset?.source === "local" ? asset.file : resolvedPlayUrl;
+        if (!blobOrUrl) continue;
 
         const loaderKey = crossTransitionClipIds.has(clip.id) ? `${assetId}:${clip.id}` : assetId;
 
+        if (asset?.source === "tams") {
+          const prevUrl = loaderUrlsRef.current.get(loaderKey);
+          if (prevUrl && prevUrl !== resolvedPlayUrl) {
+            loaderManager.disposeLoader(loaderKey);
+            loaderUrlsRef.current.delete(loaderKey);
+          }
+        }
+
         try {
-          const loader = await loaderManager.getLoader(loaderKey, asset.file);
+          const loader = await loaderManager.getLoader(loaderKey, blobOrUrl);
+          if (asset?.source === "tams") {
+            loaderUrlsRef.current.set(loaderKey, resolvedPlayUrl);
+          }
           const sourceTime = calculateSourceTime(startFrame, clip, currentFps);
           // Set playback rate to match global speed
           const videoElement = loader.getVideoElement();
@@ -790,11 +836,13 @@ export function PreviewPanel() {
   useEffect(() => {
     const imageElements = imageElementsRef.current;
     const loaderManager = loaderManagerRef.current;
+    const loaderUrls = loaderUrlsRef.current;
     return () => {
       for (const [, entry] of imageElements) {
         URL.revokeObjectURL(entry.objectUrl);
       }
       imageElements.clear();
+      loaderUrls.clear();
       loaderManager.disposeAll();
     };
   }, []);

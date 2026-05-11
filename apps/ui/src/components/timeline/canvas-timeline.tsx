@@ -1247,7 +1247,10 @@ export function CanvasTimeline() {
               const file = files[0];
               asset = useAssetStore
                 .getState()
-                .assets.find((a) => a.name === file.name && a.size === file.size);
+                .assets.find(
+                  (a): a is (typeof imported)[number] =>
+                    a.source === "local" && a.name === file.name && a.size === file.size,
+                );
             }
             if (!asset) return;
             const rect = el.getBoundingClientRect();

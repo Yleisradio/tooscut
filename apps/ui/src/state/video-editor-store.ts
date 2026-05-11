@@ -164,6 +164,10 @@ export interface MediaAsset {
   sourceFps?: FrameRate;
   /** LUT cube dimension (e.g. 17, 33, 65). Only present for type="lut". */
   lutSize?: number;
+  /** TAMS provenance — present when asset originates from a TAMS flow */
+  tamsSourceId?: string;
+  tamsFlowId?: string;
+  segmentTimerange?: string;
 }
 
 /**

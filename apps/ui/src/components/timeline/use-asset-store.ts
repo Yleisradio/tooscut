@@ -1,33 +1,48 @@
-import { secondsToFrames } from "@tooscut/render-engine";
-/**
- * Asset store for managing imported media files.
- */
 import { create } from "zustand";
 
-import { db } from "../../state/db";
+import { db, type TamsAssetRecord } from "../../state/db";
 import {
   useVideoEditorStore,
   type MediaAsset as StoreMediaAsset,
 } from "../../state/video-editor-store";
 
-export interface MediaAsset {
+// ============================================================================
+// MediaAsset discriminated union
+// ============================================================================
+
+interface MediaAssetBase {
   id: string;
   type: "video" | "audio" | "image" | "lut";
   name: string;
-  /** Object URL for playback/preview */
+  /** Object URL (local) or presigned GET URL (TAMS) for playback/preview */
   url: string;
   /** Duration in seconds (0 for images) */
   duration: number;
-  /** File size in bytes */
-  size: number;
-  /** Original file reference */
-  file: File;
-  /** Video/image dimensions */
   width?: number;
   height?: number;
-  /** Thumbnail data URL (for video/image) */
   thumbnailUrl?: string;
 }
+
+export type LocalMediaAsset = MediaAssetBase & {
+  source: "local";
+  /** Original file reference */
+  file: File;
+  /** File size in bytes */
+  size: number;
+};
+
+export type TamsMediaAsset = MediaAssetBase & {
+  source: "tams";
+  tamsSourceId: string;
+  tamsFlowId: string;
+  segmentTimerange: string;
+};
+
+export type MediaAsset = LocalMediaAsset | TamsMediaAsset;
+
+// ============================================================================
+// Store
+// ============================================================================
 
 interface AssetState {
   assets: MediaAsset[];
@@ -36,6 +51,7 @@ interface AssetState {
 
   addAsset: (asset: MediaAsset) => void;
   addAssets: (assets: MediaAsset[]) => void;
+  patchAsset: (id: string, patch: Partial<MediaAsset>) => void;
   removeAsset: (id: string) => void;
   clearAssets: () => void;
   setLoading: (loading: boolean) => void;
@@ -51,26 +67,32 @@ export const useAssetStore = create<AssetState>((set) => ({
 
   addAssets: (assets) => set((state) => ({ assets: [...state.assets, ...assets] })),
 
+  patchAsset: (id, patch) =>
+    set((state) => ({
+      assets: state.assets.map((a) => (a.id === id ? ({ ...a, ...patch } as MediaAsset) : a)),
+    })),
+
   removeAsset: (id) =>
     set((state) => {
       const asset = state.assets.find((a) => a.id === id);
-      if (asset) {
+      if (asset?.source === "local") {
         URL.revokeObjectURL(asset.url);
-        if (asset.thumbnailUrl) {
-          URL.revokeObjectURL(asset.thumbnailUrl);
-        }
+        if (asset.thumbnailUrl) URL.revokeObjectURL(asset.thumbnailUrl);
+      }
+      if (asset?.source === "tams") {
+        void db.tamsAssets.delete(id);
       }
       return { assets: state.assets.filter((a) => a.id !== id) };
     }),
 
   clearAssets: () =>
     set((state) => {
-      state.assets.forEach((asset) => {
-        URL.revokeObjectURL(asset.url);
-        if (asset.thumbnailUrl) {
-          URL.revokeObjectURL(asset.thumbnailUrl);
+      for (const asset of state.assets) {
+        if (asset.source === "local") {
+          URL.revokeObjectURL(asset.url);
+          if (asset.thumbnailUrl) URL.revokeObjectURL(asset.thumbnailUrl);
         }
-      });
+      }
       return { assets: [] };
     }),
 
@@ -78,9 +100,10 @@ export const useAssetStore = create<AssetState>((set) => ({
   setError: (error) => set({ error }),
 }));
 
-/**
- * Get file type from MIME type.
- */
+// ============================================================================
+// File import utilities
+// ============================================================================
+
 function getAssetType(mimeType: string): "video" | "audio" | "image" | null {
   if (mimeType.startsWith("video/")) return "video";
   if (mimeType.startsWith("audio/")) return "audio";
@@ -88,16 +111,10 @@ function getAssetType(mimeType: string): "video" | "audio" | "image" | null {
   return null;
 }
 
-/**
- * Generate a unique ID.
- */
 function generateId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 }
 
-/**
- * Get video duration and dimensions.
- */
 async function getVideoMetadata(
   file: File,
 ): Promise<{ duration: number; width: number; height: number }> {
@@ -123,9 +140,6 @@ async function getVideoMetadata(
   });
 }
 
-/**
- * Get audio duration.
- */
 async function getAudioDuration(file: File): Promise<number> {
   return new Promise((resolve, reject) => {
     const audio = document.createElement("audio");
@@ -145,18 +159,12 @@ async function getAudioDuration(file: File): Promise<number> {
   });
 }
 
-/**
- * Get image dimensions.
- */
 async function getImageDimensions(file: File): Promise<{ width: number; height: number }> {
   return new Promise((resolve, reject) => {
     const img = new Image();
 
     img.onload = () => {
-      resolve({
-        width: img.naturalWidth,
-        height: img.naturalHeight,
-      });
+      resolve({ width: img.naturalWidth, height: img.naturalHeight });
       URL.revokeObjectURL(img.src);
     };
 
@@ -169,9 +177,6 @@ async function getImageDimensions(file: File): Promise<{ width: number; height: 
   });
 }
 
-/**
- * Generate a thumbnail for video or image.
- */
 async function generateThumbnail(file: File, type: "video" | "image"): Promise<string> {
   const canvas = document.createElement("canvas");
   const ctx = canvas.getContext("2d");
@@ -201,7 +206,6 @@ async function generateThumbnail(file: File, type: "video" | "image"): Promise<s
     });
   }
 
-  // Video thumbnail — use createImageBitmap for high-quality capture
   const video = document.createElement("video");
   video.preload = "auto";
   video.muted = true;
@@ -215,15 +219,11 @@ async function generateThumbnail(file: File, type: "video" | "image"): Promise<s
 
     video.onseeked = async () => {
       try {
-        // Wait for the frame to be fully decoded
         if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
           await new Promise<void>((r) => {
             video.addEventListener("canplay", () => r(), { once: true });
           });
         }
-        // Capture the frame respecting display rotation.
-        // drawImage(video) always applies the video's rotation metadata,
-        // unlike createImageBitmap which may return raw unrotated frames.
         const displayW = video.videoWidth;
         const displayH = video.videoHeight;
         const scale = Math.min(thumbnailSize / displayW, thumbnailSize / displayH);
@@ -249,20 +249,19 @@ async function generateThumbnail(file: File, type: "video" | "image"): Promise<s
   });
 }
 
-/**
- * Import files and create MediaAsset objects.
- * Optionally accepts FileSystemFileHandles for persistence across sessions.
- */
 export async function importFiles(
   files: FileList | File[],
   fileHandles?: FileSystemFileHandle[],
-): Promise<MediaAsset[]> {
-  const assets: MediaAsset[] = [];
+): Promise<LocalMediaAsset[]> {
+  const assets: LocalMediaAsset[] = [];
   const fileArray = Array.from(files);
 
-  // Build a set of existing assets for dedup (match by name + size + type)
   const existingAssets = useAssetStore.getState().assets;
-  const existingKeys = new Set(existingAssets.map((a) => `${a.name}|${a.size}|${a.type}`));
+  const existingKeys = new Set(
+    existingAssets
+      .filter((a): a is LocalMediaAsset => a.source === "local")
+      .map((a) => `${a.name}|${a.size}|${a.type}`),
+  );
 
   for (let i = 0; i < fileArray.length; i++) {
     const file = fileArray[i];
@@ -272,11 +271,8 @@ export async function importFiles(
       continue;
     }
 
-    // Skip duplicates (same name, size, and type already imported)
     const dedupeKey = `${file.name}|${file.size}|${type}`;
-    if (existingKeys.has(dedupeKey)) {
-      continue;
-    }
+    if (existingKeys.has(dedupeKey)) continue;
     existingKeys.add(dedupeKey);
 
     try {
@@ -300,11 +296,10 @@ export async function importFiles(
         const dims = await getImageDimensions(file);
         width = dims.width;
         height = dims.height;
-        duration = 10; // Default duration for images (can be freely extended)
+        duration = 10;
         thumbnailUrl = await generateThumbnail(file, "image");
       }
 
-      // Store file handle in IndexedDB for persistence
       const handle = fileHandles?.[i];
       if (handle) {
         await db.fileHandles.put({
@@ -319,6 +314,7 @@ export async function importFiles(
 
       assets.push({
         id,
+        source: "local",
         type,
         name: file.name,
         url,
@@ -337,21 +333,15 @@ export async function importFiles(
   return assets;
 }
 
-/** Map accept strings like "video/*" to file extensions for showOpenFilePicker */
 const ACCEPT_MAP: Record<string, string[]> = {
   "video/*": [".mp4", ".webm", ".mov", ".avi", ".mkv"],
   "audio/*": [".mp3", ".wav", ".ogg", ".aac", ".flac"],
   "image/*": [".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"],
 };
 
-/**
- * Import files using the File System Access API (showOpenFilePicker).
- * This provides FileSystemFileHandles that persist across sessions.
- * @param accept - Comma-separated accept string (e.g. "video/*,audio/*,image/*")
- */
 export async function importFilesWithPicker(
   accept = "video/*,audio/*,image/*",
-): Promise<MediaAsset[]> {
+): Promise<LocalMediaAsset[]> {
   const picker = (
     window as unknown as {
       showOpenFilePicker?: (options: Record<string, unknown>) => Promise<FileSystemFileHandle[]>;
@@ -359,7 +349,6 @@ export async function importFilesWithPicker(
   ).showOpenFilePicker;
 
   if (!picker) {
-    // Fall back to regular file picker (no handles → assets won't persist)
     return new Promise((resolve) => {
       const input = document.createElement("input");
       input.type = "file";
@@ -376,7 +365,6 @@ export async function importFilesWithPicker(
     });
   }
 
-  // Build accept entries from the accept string
   const acceptEntries: Record<string, string[]> = {};
   for (const part of accept.split(",")) {
     const key = part.trim();
@@ -388,36 +376,27 @@ export async function importFilesWithPicker(
   try {
     const handles = await picker({
       multiple: true,
-      types: [
-        {
-          description: "Media files",
-          accept: acceptEntries,
-        },
-      ],
+      types: [{ description: "Media files", accept: acceptEntries }],
     });
 
     const files = await Promise.all(handles.map((h: FileSystemFileHandle) => h.getFile()));
     return importFiles(files, handles);
   } catch (err) {
-    // User cancelled picker
-    if (err instanceof DOMException && err.name === "AbortError") {
-      return [];
-    }
+    if (err instanceof DOMException && err.name === "AbortError") return [];
     throw err;
   }
 }
 
+// ============================================================================
+// Hydration (file handle → blob URL restoration)
+// ============================================================================
+
 interface HydratedAsset extends StoreMediaAsset {
+  source: "local";
   file: File;
   size: number;
 }
 
-/**
- * Hydrate assets from stored file handles.
- * Only restores assets where permission is already "granted".
- * Assets needing permission (state="prompt") are returned in `pendingIds` —
- * these require a user gesture to call requestPermission().
- */
 export async function hydrateAssets(assets: StoreMediaAsset[]): Promise<{
   hydrated: HydratedAsset[];
   pendingIds: string[];
@@ -428,9 +407,8 @@ export async function hydrateAssets(assets: StoreMediaAsset[]): Promise<{
   const failedIds: string[] = [];
 
   for (const asset of assets) {
-    // Assets that already have URLs (e.g. remote) don't need file handle hydration
+    // Remote-URL assets (TAMS) and non-empty URLs don't need file handle hydration
     if (asset.url !== "") continue;
-    // LUT assets are hydrated separately via lut-manager
     if (asset.type === "lut") continue;
 
     try {
@@ -448,9 +426,8 @@ export async function hydrateAssets(assets: StoreMediaAsset[]): Promise<{
       if (permission === "granted") {
         const file = await stored.handle.getFile();
         const url = URL.createObjectURL(file);
-        hydrated.push({ ...asset, url, file, size: file.size });
+        hydrated.push({ ...asset, source: "local", url, file, size: file.size });
       } else if (permission === "prompt") {
-        // Needs user gesture to request — can't do it automatically
         pendingIds.push(asset.id);
       } else {
         failedIds.push(asset.id);
@@ -464,10 +441,6 @@ export async function hydrateAssets(assets: StoreMediaAsset[]): Promise<{
   return { hydrated, pendingIds, failedIds };
 }
 
-/**
- * Request file permission for pending assets. MUST be called from a user gesture (click).
- * For each asset ID, looks up the stored handle, requests permission, and restores the file.
- */
 export async function requestPermissionAndHydrate(
   assetIds: string[],
   allAssets: StoreMediaAsset[],
@@ -490,7 +463,7 @@ export async function requestPermissionAndHydrate(
       if (result === "granted") {
         const file = await stored.handle.getFile();
         const url = URL.createObjectURL(file);
-        hydrated.push({ ...asset, url, file, size: file.size });
+        hydrated.push({ ...asset, source: "local", url, file, size: file.size });
       }
     } catch (err) {
       console.error(`[permission] asset ${assetId}: error`, err);
@@ -500,12 +473,10 @@ export async function requestPermissionAndHydrate(
   return hydrated;
 }
 
-/**
- * Format file size for display.
- */
-/**
- * Handle a native file drop event, extracting FileSystemFileHandles when available.
- */
+// ============================================================================
+// Native file drop
+// ============================================================================
+
 export function handleNativeFileDrop(
   e: DragEvent,
   onDrop: (files: FileList, handles?: FileSystemFileHandle[]) => void,
@@ -541,12 +512,11 @@ export function handleNativeFileDrop(
   }
 }
 
-/**
- * Sync imported assets to both stores:
- * - useAssetStore (UI: thumbnails, File objects, drag-to-timeline)
- * - useVideoEditorStore (persistence: auto-saved to IndexedDB)
- */
-export function addAssetsToStores(imported: MediaAsset[]) {
+// ============================================================================
+// Store sync helpers
+// ============================================================================
+
+export function addAssetsToStores(imported: LocalMediaAsset[]) {
   useAssetStore.getState().addAssets(imported);
   const projectFps = useVideoEditorStore.getState().settings.fps;
   const editorAssets: StoreMediaAsset[] = imported.map((a) => ({
@@ -554,14 +524,52 @@ export function addAssetsToStores(imported: MediaAsset[]) {
     type: a.type,
     name: a.name,
     url: a.url,
-    // Convert source duration (seconds) to project frames
-    duration: a.type === "image" ? 0 : secondsToFrames(a.duration, projectFps),
+    duration:
+      a.type === "image"
+        ? 0
+        : Math.round((a.duration * projectFps.numerator) / projectFps.denominator),
     width: a.width,
     height: a.height,
     thumbnailUrl: a.thumbnailUrl,
   }));
   useVideoEditorStore.getState().addAssets(editorAssets);
 }
+
+/**
+ * Add a TAMS asset to both the UI store and the editor store.
+ * Deduplicates by flowId + segmentTimerange — returns the effective asset ID.
+ */
+export function addTamsAssetToStores(ui: TamsMediaAsset, store: StoreMediaAsset): string {
+  const existing = useAssetStore
+    .getState()
+    .assets.find(
+      (a): a is TamsMediaAsset =>
+        a.source === "tams" &&
+        a.tamsFlowId === ui.tamsFlowId &&
+        a.segmentTimerange === ui.segmentTimerange,
+    );
+  if (existing) return existing.id;
+
+  useAssetStore.getState().addAsset(ui);
+  useVideoEditorStore.getState().addAssets([store]);
+
+  const record: TamsAssetRecord = {
+    id: ui.id,
+    sourceId: ui.tamsSourceId,
+    flowId: ui.tamsFlowId,
+    segmentTimerange: ui.segmentTimerange,
+    label: ui.name,
+    format: ui.type,
+    storedAt: Date.now(),
+  };
+  void db.tamsAssets.put(record);
+
+  return ui.id;
+}
+
+// ============================================================================
+// Format helpers
+// ============================================================================
 
 export function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -570,9 +578,6 @@ export function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
-/**
- * Format duration for display.
- */
 export function formatDuration(seconds: number): string {
   const mins = Math.floor(seconds / 60);
   const secs = Math.floor(seconds % 60);
