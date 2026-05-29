@@ -30,6 +30,12 @@ export function useTamsHydration() {
 
     for (const asset of tamsAssets) {
       if (alreadyHydrated.has(asset.id)) continue;
+      // Skip blob URLs — they belong to live-captured clips and can't be
+      // re-hydrated from a single TAMS segment (see build-live-clip.ts).
+      if (asset.url?.startsWith("blob:")) {
+        alreadyHydrated.add(asset.id);
+        continue;
+      }
       alreadyHydrated.add(asset.id);
 
       void (async () => {

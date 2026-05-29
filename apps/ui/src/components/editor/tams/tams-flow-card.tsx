@@ -3,6 +3,7 @@ import { timerangeDurationSeconds } from "@tooscut/tams-client";
 import { Video, Music } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
+import { useLiveMonitorStore } from "../../../state/live-monitor-store";
 import { useVideoEditorStore } from "../../../state/video-editor-store";
 import { addTamsAssetToStores, formatDuration } from "../../timeline/use-asset-store";
 import { flowToMediaAsset } from "./tams-to-asset";
@@ -16,6 +17,10 @@ interface TamsFlowCardProps {
 
 export function TamsFlowCard({ flow, segment }: TamsFlowCardProps) {
   const projectFps = useVideoEditorStore((s) => s.settings.fps);
+  const activeFlowId = useLiveMonitorStore((s) => s.flowId);
+
+  const isLive = flow.tags?.live === "true";
+  const isMonitoring = activeFlowId === flow.id;
 
   const durationSec = segment ? timerangeDurationSeconds(segment.timerange) : 0;
   const isAudio = flow.format.includes(":audio");
@@ -53,6 +58,14 @@ export function TamsFlowCard({ flow, segment }: TamsFlowCardProps) {
     };
   }, [presignedUrl, isAudio]);
 
+  const handleClick = () => {
+    if (isMonitoring) {
+      useLiveMonitorStore.getState().stopMonitoring();
+    } else {
+      useLiveMonitorStore.getState().startMonitoring(flow.id, flow.source_id);
+    }
+  };
+
   const handleDragStart = (e: React.DragEvent) => {
     const { ui, store } = flowToMediaAsset(flow, segment, projectFps);
     const uiWithThumb: typeof ui = thumbnailUrl ? { ...ui, thumbnailUrl } : ui;
@@ -74,9 +87,13 @@ export function TamsFlowCard({ flow, segment }: TamsFlowCardProps) {
   return (
     <div
       ref={rootRef}
-      className="group flex cursor-grab items-center gap-2 overflow-hidden rounded-md border border-border bg-background active:cursor-grabbing hover:bg-accent"
+      className={[
+        "group flex cursor-grab items-center gap-2 overflow-hidden rounded-md border bg-background active:cursor-grabbing hover:bg-accent",
+        isMonitoring ? "border-destructive" : "border-border",
+      ].join(" ")}
       draggable
       onDragStart={handleDragStart}
+      onClick={handleClick}
     >
       {/* Thumbnail strip */}
       <div className="relative flex size-10 shrink-0 items-center justify-center overflow-hidden rounded-l-md bg-muted">
@@ -86,6 +103,14 @@ export function TamsFlowCard({ flow, segment }: TamsFlowCardProps) {
           <Music className="size-3.5 text-muted-foreground" />
         ) : (
           <Video className="size-3.5 text-muted-foreground" />
+        )}
+
+        {/* LIVE badge overlaid on thumbnail */}
+        {isLive && (
+          <div className="absolute inset-x-0 bottom-0 flex items-center justify-center gap-0.5 bg-destructive/90 py-0.5">
+            <span className="size-1 animate-pulse rounded-full bg-white" />
+            <span className="text-[8px] font-bold uppercase tracking-wide text-white">Live</span>
+          </div>
         )}
       </div>
 

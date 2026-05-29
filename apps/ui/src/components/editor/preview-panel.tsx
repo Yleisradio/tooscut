@@ -24,6 +24,7 @@ import {
   type CompositorApi,
 } from "../../workers/compositor-api";
 import { useAssetStore, type MediaAsset } from "../timeline/use-asset-store";
+import { LivePreviewOverlay } from "./tams/live-preview-overlay";
 import { tamsUrlCache } from "./tams/tams-url-cache";
 import { TransformOverlay } from "./transform/transform-overlay";
 
@@ -1090,6 +1091,9 @@ export function PreviewPanel() {
           </div>
         </div>
       </div>
+
+      {/* Live preview overlay — mounts when a live TAMS flow is being monitored */}
+      <LivePreviewOverlay />
 
       {/* Drop overlay */}
       {isDragOver && (

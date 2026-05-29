@@ -19,6 +19,10 @@ export function useTamsUrlRefresh() {
         .assets.filter((a): a is TamsMediaAsset => a.source === "tams");
 
       for (const asset of assets) {
+        // Skip live-captured clips — their url is a blob: containing a
+        // pre-fetched init + media payload. Refreshing would swap that for a
+        // single-segment presigned URL the rest of the pipeline can't decode.
+        if (asset.url.startsWith("blob:")) continue;
         if (!tamsUrlCache.isNearExpiry(asset.id)) continue;
 
         try {
